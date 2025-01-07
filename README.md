@@ -1,6 +1,12 @@
 # MusicBot
 A simple discord bot for playing music in voice channels, written in python
 
+## Requirements
+- `pycord`
+- `yt_dlp`
+- `python-dotenv` (optional): You can choose to include the discord bot token in the `main.py` file instead of an ENV file, although it is not recommended
+- `ffmpeg`
+
 ## Usage
 Type `!join` for the bot to connect to your voice channel
 

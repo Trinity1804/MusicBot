@@ -44,6 +44,11 @@ YTDL_OPTIONS = {
     "quiet": True,
     "default_search": "auto",
     "source_address": "0.0.0.0",  # Bind to IPv4 since IPv6 can cause issues
+    "headers": {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Accept-Language": "en",
+    },
 }
 
 ydl = yt_dlp.YoutubeDL(YTDL_OPTIONS)

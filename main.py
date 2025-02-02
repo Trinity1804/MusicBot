@@ -1,147 +1,161 @@
-import os
-import logging
-import asyncio
-from collections import deque
-from dotenv import load_dotenv
 import discord
 from discord.ext import commands
-import yt_dlp as youtube_dl
+import asyncio
+import yt_dlp
+import dotenv
 
-# Load environment variables
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = dotenv.get_key(".env", "BOT_TOKEN")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
-)
-
-# Suppress noise about yt-dlp
-youtube_dl.utils.bug_reports_message = lambda: ""
-
-# FFmpeg options
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn"
-}
-
-# YT-DLP options
-YTDL_OPTIONS = {
-    "format": "bestaudio/best",
-    "extractaudio": True,
-    "audioformat": "mp3",
-    "outtmpl": "%(extractor)s-%(id)s-%(title)s.%(ext)s",
-    "restrictfilenames": True,
-    "noplaylist": True,
-    "nocheckcertificate": True,
-    "ignoreerrors": False,
-    "logtostderr": False,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "auto",
-    "source_address": "0.0.0.0"
-}
-
-# Initialize bot
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# MusicPlayer class
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'default_search': 'ytsearch'  
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+class Song:
+    def __init__(self, source, title):
+        self.source = source
+        self.title = title
+
 class MusicPlayer:
-    def __init__(self, bot):
-        self.queue = deque()
-        self.current_song = None
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.current = None
         self.loop = False
         self.voice_client = None
-        self.bot = bot  # Pass the bot instance to access the event loop
+        self.play_next_song = asyncio.Event()
+    
+    async def audio_player_task(self):
+        while True:
+            self.play_next_song.clear()
+            self.current = await self.queue.get()
+            if self.voice_client is not None:
+                self.voice_client.play(
+                    discord.FFmpegPCMAudio(self.current.source, **FFMPEG_OPTIONS),
+                    after=lambda e: self.bot_loop.call_soon_threadsafe(self.play_next_song.set)
+                )
+                await self.play_next_song.wait()
+                if self.loop:
+                    await self.queue.put(self.current)
+            else:
+                while not self.queue.empty():
+                    self.queue.get_nowait()
 
-    def play_next_song(self, error=None):
-        if error:
-            logging.error(f"Playback error: {error}")
+player = MusicPlayer()
+player.bot_loop = bot.loop
 
-        if self.loop and self.current_song:
-            self.queue.appendleft(self.current_song)
+def yt_search(url_or_term):
+    if not url_or_term.startswith("http"):
+        url_or_term = f"ytsearch1:{url_or_term}"
+    with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ytdl:
+        try:
+            info = ytdl.extract_info(url_or_term, download=False)
+        except Exception:
+            info = None
+    if info is None:
+        return None
+    if 'entries' in info:
+        info = info['entries'][0]
+    return Song(info['url'], info.get('title', 'Unknown Title'))
 
-        if self.queue:
-            self.current_song = self.queue.popleft()
-            source = discord.FFmpegPCMAudio(self.current_song["url"], **FFMPEG_OPTIONS)
-            self.voice_client.play(source, after=self.play_next_song)
+@bot.command(name="join")
+async def join(ctx):
+    if ctx.author.voice:
+        channel = ctx.author.voice.channel
+        if ctx.voice_client is None:
+            vc = await channel.connect()
+            player.voice_client = vc
+            bot.loop.create_task(player.audio_player_task())
         else:
-            self.current_song = None
-            asyncio.run_coroutine_threadsafe(self.voice_client.disconnect(), self.bot.loop)
-
-    async def add_to_queue(self, song):
-        self.queue.append(song)
-        if not self.voice_client.is_playing() and not self.voice_client.is_paused():
-            self.play_next_song()
-
-# Initialize MusicPlayer
-music_player = MusicPlayer(bot)
-
-# Bot commands
-@bot.event
-async def on_ready():
-    logging.info(f"Logged in as {bot.user.name}")
+            await ctx.voice_client.move_to(channel)
+        await ctx.send(f"Joined {channel.name}")
+    else:
+        await ctx.send("You are not connected to a voice channel.")
 
 @bot.command(name="play")
 async def play(ctx, *, query: str):
-    if not ctx.author.voice:
-        await ctx.send("You are not connected to a voice channel.")
+    if ctx.author.voice is None:
+        await ctx.send("Connect to a voice channel first.")
         return
+    if ctx.voice_client is None:
+        await join(ctx)
+    song = yt_search(query)
+    if song is None:
+        await ctx.send("Could not retrieve song.")
+        return
+    await player.queue.put(song)
+    await ctx.send(f"Queued: {song.title}")
 
-    if not music_player.voice_client:
-        music_player.voice_client = await ctx.author.voice.channel.connect()
-
-    with youtube_dl.YoutubeDL(YTDL_OPTIONS) as ydl:
-        info = ydl.extract_info(f"ytsearch:{query}", download=False)["entries"][0]
-        song = {
-            "title": info["title"],
-            "url": info["url"]
-        }
-        await music_player.add_to_queue(song)
-        await ctx.send(f"Added to queue: **{song['title']}**")
+@bot.command(name="queue")
+async def queue_(ctx):
+    if player.current:
+        msg = f"Now playing: {player.current.title}\n"
+    else:
+        msg = "No song is playing currently.\n"
+    if player.queue.empty():
+        msg += "Queue is empty."
+    else:
+        msg += "Up next:\n"
+        queue_list = list(player.queue._queue)
+        for idx, s in enumerate(queue_list, 1):
+            msg += f"{idx}. {s.title}\n"
+    await ctx.send(msg)
 
 @bot.command(name="skip")
 async def skip(ctx):
-    if music_player.voice_client and music_player.voice_client.is_playing():
-        music_player.voice_client.stop()
-        await ctx.send("Skipped the current song.")
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.stop()
+        await ctx.send("Skipped the song.")
     else:
-        await ctx.send("No song is currently playing.")
+        await ctx.send("No song is playing.")
+
+@bot.command(name="loop")
+async def loop(ctx, mode: str):
+    if mode.lower() == "on":
+        player.loop = True
+        await ctx.send("Looping enabled.")
+    elif mode.lower() == "off":
+        player.loop = False
+        await ctx.send("Looping disabled.")
+    else:
+        await ctx.send("Use !loop on or !loop off.")
 
 @bot.command(name="stop")
 async def stop(ctx):
-    if music_player.voice_client:
-        music_player.queue.clear()
-        music_player.voice_client.stop()
-        await music_player.voice_client.disconnect()
-        await ctx.send("Stopped playback and cleared the queue.")
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect()
+        player.voice_client = None
+        # Clear queue
+        while not player.queue.empty():
+            player.queue.get_nowait()
+        await ctx.send("Stopped playback and disconnected.")
     else:
-        await ctx.send("The bot is not connected to a voice channel.")
+        await ctx.send("Not connected to any voice channel.")
 
-@bot.command(name="queue")
-async def queue(ctx):
-    if not music_player.queue:
-        await ctx.send("The queue is empty.")
-        return
+@bot.command(name="pause")
+async def pause(ctx):
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.pause()
+        await ctx.send("Paused the song.")
+    else:
+        await ctx.send("No song is playing.")
 
-    embed = discord.Embed(title="Song Queue", color=discord.Color.blue())
-    embed.add_field(name="Now Playing", value=music_player.current_song["title"], inline=False)
-    for i, song in enumerate(music_player.queue, start=1):
-        embed.add_field(name=f"{i}. {song['title']}", value="\u200b", inline=False)
-    await ctx.send(embed=embed)
+@bot.command(name="resume")
+async def resume(ctx):
+    if ctx.voice_client and ctx.voice_client.is_paused():
+        ctx.voice_client.resume()
+        await ctx.send("Resumed the song.")
+    else:
+        await ctx.send("The song is not paused.")
 
-@bot.command(name="loop")
-async def loop(ctx):
-    music_player.loop = not music_player.loop
-    await ctx.send(f"Looping is now {'**on**' if music_player.loop else '**off**'}.")
-
-# Run the bot
-if __name__ == "__main__":
-    bot.run(BOT_TOKEN)
+bot.run(BOT_TOKEN)

@@ -14,10 +14,14 @@ Type `!play [video_url]` for the bot to play music from a YouTube URL
 
 Type `!play [keyword]` for the bot to play music from the most relevant YouTube video based on the keyword provided
 
-Type `!loop` to toggle looping of the currently playing song (looping is off by default)
+Type `!loop on` or `!loop off` to turn the looping of the currently playing song on or off (looping is off by default)
 
 Type `!skip` to skip the current song
 
 Type `!stop` to exit the voice channel
+
+Type `!pause` ro pause the currently playing song
+
+Type `!resume` to resume the paused song
 
 Type `!queue` to show the current song queue
